@@ -1,0 +1,18 @@
+{
+  "name": "home-tray",
+  "version": "1.0.0",
+  "description": "Seu home na bandeja do Windows",
+  "main": "main.js",
+  "author": "Alexandre",
+  "private": true,
+  "scripts": { "start": "electron .", "dist": "electron-builder --win portable" },
+  "devDependencies": { "electron": "^42.0.0", "electron-builder": "^26.0.0" },
+  "build": {
+    "appId": "local.hometray.app",
+    "productName": "Home Tray",
+    "files": ["main.js", "settings.html", "tray.png"],
+    "win": { "target": "portable", "signAndEditExecutable": false },
+    "portable": { "artifactName": "HomeTray.exe" }
+  }
+}
+
