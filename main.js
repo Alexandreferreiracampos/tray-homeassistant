@@ -15,6 +15,60 @@ let tray,
   settingsWindow,
   address = "",
   quitting = false;
+let windowSettings = { width: 720, height: 480, kiosk: false };
+let changingWindowMode = false;
+let blurTimer;
+function closeHome() {
+  clearTimeout(blurTimer);
+  const window = popup;
+  popup = null;
+  if (window && !window.isDestroyed()) window.destroy();
+}
+function applyWindowMode(kiosk) {
+  changingWindowMode = true;
+  try {
+    // No Windows, permita redimensionamento antes de entrar em tela cheia.
+    popup.setResizable(true);
+    popup.setFullScreenable(true);
+    popup.setKiosk(false);
+    popup.setFullScreen(false);
+    if (kiosk) {
+      const trayBounds = tray.getBounds();
+      const display = screen.getDisplayNearestPoint({
+        x: trayBounds.x,
+        y: trayBounds.y,
+      });
+      // bounds inclui toda a tela, inclusive a região da barra de tarefas.
+      popup.setBounds(display.bounds);
+      popup.show();
+      popup.setFullScreen(true);
+      popup.setKiosk(true);
+    } else {
+      position();
+      popup.setResizable(false);
+      popup.show();
+    }
+    popup.focus();
+  } finally {
+    changingWindowMode = false;
+  }
+}
+function validateSettings(value) {
+  const width = Number(value.width),
+    height = Number(value.height);
+  if (
+    !Number.isInteger(width) ||
+    width < 240 ||
+    width > 7680 ||
+    !Number.isInteger(height) ||
+    height < 180 ||
+    height > 4320
+  )
+    throw new Error(
+      "Use largura entre 240 e 7680 e altura entre 180 e 4320, em números inteiros.",
+    );
+  return { width, height, kiosk: value.kiosk === true };
+}
 const configPath = () => path.join(app.getPath("userData"), "settings.json");
 function normalize(value) {
   const input = value.trim();
@@ -35,8 +89,8 @@ function position() {
     x: bounds.x,
     y: bounds.y,
   }).workArea;
-  const width = 720,
-    height = 480;
+  const width = Math.min(windowSettings.width, area.width - 24),
+    height = Math.min(windowSettings.height, area.height - 16);
   const clamp = (n, min, max) => Math.max(min, Math.min(n, max));
   popup.setBounds({
     width,
@@ -44,7 +98,7 @@ function position() {
     x:
       clamp(
         bounds.x + bounds.width / 2 - width / 2,
-        area.x,
+        area.x + 12,
         area.x + area.width - width - 12,
       ) | 0,
     y: clamp(bounds.y - height - 8, area.y, area.y + area.height - height) | 0,
@@ -55,13 +109,15 @@ function loadHome() {
   popup.loadURL(address).catch(() => {});
 }
 function showHome() {
+  clearTimeout(blurTimer);
   if (!address) return showSettings();
   if (!popup) {
     popup = new BrowserWindow({
-      width: 400,
-      height: 300,
+      width: windowSettings.width,
+      height: windowSettings.height,
       frame: false,
-      resizable: false,
+      resizable: true,
+      fullscreenable: true,
       show: false,
       skipTaskbar: true,
       alwaysOnTop: true,
@@ -72,6 +128,7 @@ function showHome() {
         sandbox: true,
       },
     });
+    const homeWindow = popup;
     popup.webContents.setWindowOpenHandler(({ url }) => {
       if (/^https?:\/\//i.test(url)) popup.loadURL(url).catch(() => {});
       return { action: "deny" };
@@ -81,14 +138,21 @@ function showHome() {
     });
     popup.webContents.on("before-input-event", (event, input) => {
       if (input.key === "Escape") {
-        popup.hide();
+        if (popup.isKiosk() || popup.isFullScreen()) applyWindowMode(false);
+        else closeHome();
         event.preventDefault();
       }
     });
     popup.webContents.on(
       "did-fail-load",
       (_event, code, _description, _url, mainFrame) => {
-        if (!mainFrame || code === -3) return;
+        if (
+          !mainFrame ||
+          code === -3 ||
+          homeWindow.isDestroyed() ||
+          popup !== homeWindow
+        )
+          return;
         const html =
           '<html lang="pt-BR"><meta charset="utf-8"><body style="font:15px Segoe UI;padding:24px;background:#f4f6fa"><h2>Não foi possível conectar</h2><p>Confira o IP, a porta e a conexão com sua rede.</p><p>No menu do ícone, escolha Recarregar ou Configurar endereço.</p></body></html>';
         popup
@@ -96,20 +160,40 @@ function showHome() {
           .catch(() => {});
       },
     );
-    popup.on("blur", () => popup.hide());
+    popup.on("blur", () => {
+      if (
+        !changingWindowMode &&
+        !homeWindow.isKiosk() &&
+        !homeWindow.isFullScreen()
+      ) {
+        // Permite que o clique na bandeja seja tratado antes de destruir a janela.
+        clearTimeout(blurTimer);
+        blurTimer = setTimeout(() => {
+          if (
+            popup === homeWindow &&
+            !homeWindow.isDestroyed() &&
+            !homeWindow.isFocused()
+          )
+            closeHome();
+        }, 150);
+      }
+    });
+    popup.on("focus", () => clearTimeout(blurTimer));
     popup.on("close", (event) => {
       if (!quitting) {
         event.preventDefault();
-        popup.hide();
+        closeHome();
       }
+    });
+    popup.on("closed", () => {
+      if (popup === homeWindow) popup = null;
     });
     loadHome();
   }
-  position();
-  popup.show();
-  popup.focus();
+  applyWindowMode(windowSettings.kiosk);
 }
 function showSettings() {
+  closeHome();
   if (settingsWindow) {
     settingsWindow.show();
     settingsWindow.focus();
@@ -117,7 +201,7 @@ function showSettings() {
   }
   settingsWindow = new BrowserWindow({
     width: 460,
-    height: 330,
+    height: 550,
     resizable: false,
     autoHideMenuBar: true,
     title: "Configurar Home Tray",
@@ -127,7 +211,7 @@ function showSettings() {
   settingsWindow.webContents.on("will-navigate", (event) =>
     event.preventDefault(),
   );
-  settingsWindow.loadFile("settings.html");
+  settingsWindow.loadFile(path.join(__dirname, "settings.html"));
   settingsWindow.on("closed", () => {
     settingsWindow = null;
   });
@@ -139,9 +223,11 @@ else {
     .whenReady()
     .then(() => {
       try {
-        address = normalize(
-          JSON.parse(fs.readFileSync(configPath(), "utf8")).address,
-        );
+        const saved = JSON.parse(fs.readFileSync(configPath(), "utf8"));
+        address = normalize(saved.address);
+        try {
+          windowSettings = validateSettings({ ...windowSettings, ...saved });
+        } catch {}
       } catch {}
       tray = new Tray(
         nativeImage.createFromPath(path.join(__dirname, "tray.png")),
@@ -157,26 +243,30 @@ else {
               loadHome();
             },
           },
-          { label: "Configurar endereço…", click: showSettings },
+          { label: "Configurações…", click: showSettings },
           { type: "separator" },
           { label: "Sair", click: () => app.quit() },
         ]),
       );
-      tray.on("click", () => (popup?.isVisible() ? popup.hide() : showHome()));
-      ipcMain.handle("get-address", (event) =>
-        event.sender === settingsWindow?.webContents ? address : "",
+      tray.on("click", () => (popup?.isVisible() ? closeHome() : showHome()));
+      ipcMain.handle("get-settings", (event) =>
+        event.sender === settingsWindow?.webContents
+          ? { address, ...windowSettings }
+          : null,
       );
-      ipcMain.handle("save-address", (event, value) => {
+      ipcMain.handle("save-settings", (event, value) => {
         if (event.sender !== settingsWindow?.webContents)
           return { error: "Operação inválida." };
         try {
-          const next = normalize(value);
+          const next = normalize(value.address);
+          const nextSettings = validateSettings(value);
           fs.mkdirSync(path.dirname(configPath()), { recursive: true });
           fs.writeFileSync(
             configPath(),
-            JSON.stringify({ address: next }, null, 2),
+            JSON.stringify({ address: next, ...nextSettings }, null, 2),
           );
           address = next;
+          windowSettings = nextSettings;
           setImmediate(() => {
             settingsWindow?.close();
             loadHome();
@@ -197,5 +287,6 @@ else {
 app.on("window-all-closed", () => {});
 app.on("before-quit", () => {
   quitting = true;
+  clearTimeout(blurTimer);
   tray?.destroy();
 });
