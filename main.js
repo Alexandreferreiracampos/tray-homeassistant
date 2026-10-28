@@ -10,6 +10,9 @@ const {
 } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
+// Aplicado antes de criar qualquer sessão do Chromium.
+app.commandLine.appendSwitch("disable-http-cache");
+let cachePreparation = Promise.resolve();
 let tray,
   popup,
   settingsWindow,
@@ -104,9 +107,40 @@ function position() {
     y: clamp(bounds.y - height - 8, area.y, area.y + area.height - height) | 0,
   });
 }
-function loadHome() {
+async function loadHome() {
   if (!popup || !address) return;
-  popup.loadURL(address).catch(() => {});
+  const window = popup;
+  const target = address;
+  const session = window.webContents.session;
+  // Serialize a limpeza para não carregar uma janela durante a limpeza anterior.
+  cachePreparation = cachePreparation
+    .catch(() => {})
+    .then(async () => {
+      await session.clearCache();
+      await session.clearStorageData({
+        origin: new URL(target).origin,
+        storages: ["serviceworkers", "cachestorage"],
+      });
+    });
+  try {
+    await cachePreparation;
+    if (window.isDestroyed() || popup !== window) return;
+    await window.loadURL(target, {
+      extraHeaders: "Cache-Control: no-cache\nPragma: no-cache",
+    });
+  } catch (error) {
+    if (
+      !window.isDestroyed() &&
+      popup === window &&
+      error.code !== "ERR_ABORTED"
+    ) {
+      console.error("Falha ao atualizar o Home:", error.message);
+    }
+  }
+}
+function reloadHome() {
+  closeHome();
+  showHome();
 }
 function showHome() {
   clearTimeout(blurTimer);
@@ -237,11 +271,8 @@ else {
         Menu.buildFromTemplate([
           { label: "Abrir home", click: showHome },
           {
-            label: "Recarregar",
-            click: () => {
-              showHome();
-              loadHome();
-            },
+            label: "Recarregar sem cache",
+            click: reloadHome,
           },
           { label: "Configurações…", click: showSettings },
           { type: "separator" },
@@ -269,8 +300,7 @@ else {
           windowSettings = nextSettings;
           setImmediate(() => {
             settingsWindow?.close();
-            loadHome();
-            showHome();
+            reloadHome();
           });
           return { ok: true };
         } catch (error) {
