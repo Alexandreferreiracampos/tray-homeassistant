@@ -7,12 +7,10 @@ const {
   ipcMain,
   nativeImage,
   dialog,
+  session,
 } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
-// Aplicado antes de criar qualquer sessão do Chromium.
-app.commandLine.appendSwitch("disable-http-cache");
-let cachePreparation = Promise.resolve();
 let tray,
   popup,
   settingsWindow,
@@ -111,23 +109,9 @@ async function loadHome() {
   if (!popup || !address) return;
   const window = popup;
   const target = address;
-  const session = window.webContents.session;
-  // Serialize a limpeza para não carregar uma janela durante a limpeza anterior.
-  cachePreparation = cachePreparation
-    .catch(() => {})
-    .then(async () => {
-      await session.clearCache();
-      await session.clearStorageData({
-        origin: new URL(target).origin,
-        storages: ["serviceworkers", "cachestorage"],
-      });
-    });
   try {
-    await cachePreparation;
     if (window.isDestroyed() || popup !== window) return;
-    await window.loadURL(target, {
-      extraHeaders: "Cache-Control: no-cache\nPragma: no-cache",
-    });
+    await window.loadURL(target);
   } catch (error) {
     if (
       !window.isDestroyed() &&
@@ -138,11 +122,33 @@ async function loadHome() {
     }
   }
 }
+async function quitAndClearCache() {
+  if (quitting) return;
+  quitting = true;
+  closeHome();
+  settingsWindow?.destroy();
+  try {
+    // Encerre os produtores de cache antes da limpeza. Preserve dados de login.
+    await session.defaultSession.clearStorageData({
+      storages: ["serviceworkers", "cachestorage"],
+    });
+    await session.defaultSession.clearCache();
+    app.quit();
+  } catch (error) {
+    quitting = false;
+    dialog.showErrorBox(
+      "Não foi possível limpar o cache",
+      "O aplicativo continua na bandeja. Tente Sair novamente.\n" +
+        error.message,
+    );
+  }
+}
 function reloadHome() {
   closeHome();
   showHome();
 }
 function showHome() {
+  if (quitting) return;
   clearTimeout(blurTimer);
   if (!address) return showSettings();
   if (!popup) {
@@ -227,6 +233,7 @@ function showHome() {
   applyWindowMode(windowSettings.kiosk);
 }
 function showSettings() {
+  if (quitting) return;
   closeHome();
   if (settingsWindow) {
     settingsWindow.show();
@@ -271,12 +278,12 @@ else {
         Menu.buildFromTemplate([
           { label: "Abrir home", click: showHome },
           {
-            label: "Recarregar sem cache",
+            label: "Recarregar",
             click: reloadHome,
           },
           { label: "Configurações…", click: showSettings },
           { type: "separator" },
-          { label: "Sair", click: () => app.quit() },
+          { label: "Sair", click: quitAndClearCache },
         ]),
       );
       tray.on("click", () => (popup?.isVisible() ? closeHome() : showHome()));
